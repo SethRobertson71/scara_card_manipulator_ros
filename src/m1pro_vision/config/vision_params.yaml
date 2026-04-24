@@ -1,0 +1,15 @@
+vision_node:
+  ros__parameters:
+    # YOLO model — yolov8n.pt downloads automatically on first run
+    # For custom model: /ros2_ws/models/your_model.pt
+    model_path: "yolov8n.pt"
+    # OpenVINO device: AUTO, CPU, GPU (Intel iGPU)
+    device: "cpu"
+    # Detection confidence threshold (0.0 - 1.0)
+    confidence: 0.5
+    # Input image topic
+    image_topic: "/camera/image_raw"
+    # Max inference rate (Hz) — set lower on CPU-only systems
+    publish_rate: 10.0
+    # Filter to specific classes (empty list = detect all)
+    classes: [""]

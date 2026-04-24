@@ -1,0 +1,10 @@
+/**:
+    ros__parameters:
+        marker_size: 0.05 # Size of the markers in meters.
+        aruco_dictionary_id: "DICT_7X7_50" # Dictionary ID for the markers.
+        image_topic: "/camera/image_raw"
+        camera_info_topic: "/camera/camera_info"
+        camera_frame: "camera_color_optical_frame"
+        reference_frame: "dobot_base" # The frame of the static grid, can be the robot base
+        corner_refinement: "CORNER_REFINE_SUBPIX"
+        publish_tf: True # Publish the transform from reference_frame to marker_frame

@@ -1,0 +1,27 @@
+# ROS 2 / colcon generated output
+/build/
+/install/
+/log/
+
+# Runtime data
+/captured_raw_frames/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+
+# ROS 2 generated metadata that can appear in source trees
+*.launch.py[co]

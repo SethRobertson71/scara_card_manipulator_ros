@@ -1,0 +1,23 @@
+/**:
+  ros__parameters:
+    video_device: "/dev/video0"
+    image_width: 1280
+    image_height: 720
+    pixel_format: "mjpeg2rgb"
+    av_device_format: "YUV422P"
+    frame_id: "camera_link"
+    io_method: "mmap"
+    framerate: 30.0
+    brightness: -1
+    contrast: -1
+    saturation: -1
+    sharpness: -1
+    gain: -1
+    auto_white_balance: true
+    white_balance: 4000
+    autoexposure: false
+    exposure: 75
+    autofocus: false
+    focus: -1
+    camera_name: "c960"
+    camera_info_url: "file:///ros2_ws/src/m1pro_camera/config/calibration/c960_calibration.yaml"

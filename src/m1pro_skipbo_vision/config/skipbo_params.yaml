@@ -1,0 +1,48 @@
+skipbo_vision_node:
+  ros__parameters:
+    image_topic: "/camera/image_raw"
+    publish_rate: 10.0
+    detections_topic: "/skipbo/detections"
+    annotated_topic: "/camera/skipbo_annotated"
+    template_roi_topic: "/camera/skipbo_template_roi"
+
+    # White border segmentation in HSV.
+    white_s_max: 45
+    white_v_min: 165
+
+    # Card geometry filters.
+    min_card_area: 5000
+    min_card_area_frac: 0.017
+    max_card_area_frac: 0.155
+    card_aspect_min: 0.55
+    card_aspect_max: 0.85
+    min_white_fill: 0.72
+
+    # Rectified card size.
+    rectified_width: 200
+    rectified_height: 300
+
+    # Minimum colored pixels before color is accepted.
+    min_color_pixels: 120
+
+    # Template matching against number crops from card-templates folder.
+    template_dir: "/ros2_ws/models/card-templates/templates"
+    template_roi_x: 0.10
+    template_roi_y: 0.14
+    template_roi_w: 0.80
+    template_roi_h: 0.72
+    template_roi_scales: [0.85, 1.0, 1.15]
+    min_template_score: 0.35
+    match_upside_down_cards: true
+    use_glare_robust_preprocess: false
+    use_color_number_prior: true
+    color_number_prior_weight: 0.35
+    color_number_consistency_bonus: 1.12
+    color_number_mismatch_penalty: 0.90
+
+    # Overlap handling: split large non-card-shaped white clusters.
+    enable_overlap_split: true
+    overlap_cluster_min_area_frac: 0.04
+    overlap_cluster_max_area_frac: 0.40
+    watershed_dist_peak_ratio: 0.48
+    watershed_min_peak_area_px: 120

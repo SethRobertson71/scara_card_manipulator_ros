@@ -1,0 +1,64 @@
+# =============================================================
+# ROS2 Jazzy — Dobot M1 Pro Vision & Control
+# docker-compose.yml
+#
+# !! ALWAYS BUILD WITH BUILDKIT DISABLED !!
+#   export DOCKER_BUILDKIT=0
+#   docker compose -f docker/docker-compose.yml build --no-cache
+#
+# Run:
+#   docker compose -f docker/docker-compose.yml up -d
+# Shell in:
+#   docker exec -it ros2_dobot bash
+# =============================================================
+
+services:
+  ros2_dobot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ros2_dobot:latest
+    container_name: ros2_dobot
+
+    environment:
+      # ROS2 middleware
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - ROS_DOMAIN_ID=0
+      # OpenVINO device selection:
+      #   AUTO  = picks Intel iGPU if present, falls back to CPU
+      #   CPU   = force CPU only
+      #   GPU   = force Intel iGPU (must be available)
+      - OPENVINO_DEVICE=${OPENVINO_DEVICE:-AUTO}
+      # X11 forwarding (for RViz2 if added later)
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_X11_NO_MITSHM=1
+
+    volumes:
+      # ROS2 source packages — edited on host, built inside container
+      - ../src:/ros2_ws/src
+      # Config files (URDF, MoveIt, CycloneDDS, camera calibration)
+      - ../config:/ros2_ws/config
+      # ROS2 built workspace — persists across container restarts
+      - ../install:/ros2_ws/install
+      - ../build:/ros2_ws/build
+      # YOLO/OpenVINO model files
+      - ../models:/ros2_ws/models
+      # X11 socket for GUI tools (RViz2, rqt) if needed
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      # Full device access for USB camera and robot ethernet
+      - /dev:/dev
+
+    # Host networking — required for:
+    #   - Direct ethernet to Dobot M1 Pro (192.168.1.6)
+    #   - ROS2 DDS multicast discovery across machines
+    network_mode: host
+
+    # Required for full /dev access (USB cam, serial, ethernet)
+    privileged: true
+
+    stdin_open: true
+    tty: true
+
+    # Restart policy — change to 'no' during active development
+    # to prevent auto-restart masking crash errors
+    restart: unless-stopped

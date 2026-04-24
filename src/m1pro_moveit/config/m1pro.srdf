@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="m1pro_description">
+  <group name="m1pro_arm">
+    <chain base_link="base_link" tip_link="Link4" />
+  </group>
+  <end_effector name="m1pro_eef" parent_link="Link4" group="m1pro_arm" />
+  <group_state name="home" group="m1pro_arm">
+    <joint name="joint1" value="0.125" />
+    <joint name="joint2" value="0" />
+    <joint name="joint3" value="0" />
+    <joint name="joint4" value="0" />
+  </group_state>
+  <group_state name="ready" group="m1pro_arm">
+    <joint name="joint1" value="0.1" />
+    <joint name="joint2" value="0" />
+    <joint name="joint3" value="0" />
+    <joint name="joint4" value="0" />
+  </group_state>
+  <disable_collisions link1="base_link" link2="Link1" reason="Adjacent" />
+  <disable_collisions link1="Link1"     link2="Link2" reason="Adjacent" />
+  <disable_collisions link1="Link2"     link2="Link3" reason="Adjacent" />
+  <disable_collisions link1="Link3"     link2="Link4" reason="Adjacent" />
+  <disable_collisions link1="dummy_link" link2="base_link" reason="Adjacent" />
+  <disable_collisions link1="base_link" link2="dummy_link" reason="Adjacent" />
+</robot>

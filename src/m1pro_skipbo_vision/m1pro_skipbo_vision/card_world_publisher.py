@@ -6,6 +6,7 @@ from geometry_msgs.msg import PoseArray, Point
 import os
 from ament_index_python.packages import get_package_share_directory
 from copy import deepcopy
+from tf_transformations import euler_from_quaternion, quaternion_from_euler
 
 class CardWorldPublisher(Node):
     def __init__(self):
@@ -91,10 +92,22 @@ class CardWorldPublisher(Node):
             world_pose.position.y = world_y
             world_pose.position.z = world_z
 
+            # Extract yaw from camera pose orientation
+            q = camera_pose.orientation
+            roll, pitch, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+            
+            # Set orientation to only the z-axis rotation (yaw)
+            qx, qy, qz, qw = quaternion_from_euler(0, 0, yaw)
+            world_pose.orientation.x = qx
+            world_pose.orientation.y = qy
+            world_pose.orientation.z = qz
+            world_pose.orientation.w = qw
+
             world_poses.poses.append(world_pose)
             self.get_logger().info(
                 f"card[{idx}] cam=({cam_x:.1f}, {cam_y:.1f}) "
-                f"world=({world_pose.position.x:.3f}, {world_pose.position.y:.3f}, {world_pose.position.z:.3f})"
+                f"world=({world_pose.position.x:.3f}, {world_pose.position.y:.3f}, {world_pose.position.z:.3f}) "
+                f"yaw={np.degrees(yaw):.3f}"
             )
         
         if world_poses.poses:

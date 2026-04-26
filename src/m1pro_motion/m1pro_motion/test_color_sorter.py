@@ -5,6 +5,7 @@ Adapted from Dobot_Color_SortingV2.py to work with ROS pick_targets and labels
 """
 
 import json
+import math
 import time
 import threading
 from typing import List, Dict, Optional, Tuple
@@ -14,22 +15,20 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseArray
 from std_msgs.msg import String
 
-from m1pro_bringup.srv import MovJ, ToolDO, ClearError, EnableRobot, GetErrorID
+from m1pro_bringup.srv import MovJ, ToolDO, Sync, ClearError, EnableRobot, GetErrorID
+from tf_transformations import euler_from_quaternion
 
 
 # Hardware Pin Mapping (DO17 = Pin 2, DO18 = Pin 3)
-PUMP_PIN = 3
-SOLENOID_PIN = 4
+PUMP_PIN = 4
+SOLENOID_PIN = 3
 
 # Bin Coordinates
 BINS = {
-    "red": {"x": -18.0, "y": -303.0, "z": 130.0, "r": 90.0},
-    "purple": {"x": 108.0, "y": -311.0, "z": 130.0, "r": 90.0},
-    "green": {"x": 234.0, "y": -319.0, "z": 130.0, "r": 90.0},
+    "red": {"x": -20.0, "y": -306.0, "z": 140.0, "r": -90.0},
+    "purple": {"x": 105.0, "y": -315.0, "z": 140.0, "r": -90.0},
+    "green": {"x": 233.0, "y": -318.0, "z": 140.0, "r": -90.0},
 }
-
-
-
 
 class TestColorSorter(Node):
     def __init__(self):
@@ -37,7 +36,7 @@ class TestColorSorter(Node):
 
         self.declare_parameter('pick_targets_topic', '/world/card_poses')
         self.declare_parameter('pick_labels_topic', '/skipbo/pick_target_labels')
-        self.declare_parameter('speed_factor', 40)
+        self.declare_parameter('speed_factor', 90)
         self.declare_parameter('default_pick_z', 140.0)
         self.declare_parameter('default_pick_r', 0.0)
         self.declare_parameter('home_x', 400.0)
@@ -48,11 +47,12 @@ class TestColorSorter(Node):
         self.declare_parameter('vision_capture_sec', 1.0)
         self.declare_parameter('max_abs_workspace_x', 600.0)
         self.declare_parameter('max_abs_workspace_y', 600.0)
+        self.declare_parameter('max_workspace_xy_radius_mm', 400.0)
         self.declare_parameter('pump_on_level', 1)
         self.declare_parameter('pump_off_level', 0)
         self.declare_parameter('solenoid_on_level', 1)
         self.declare_parameter('solenoid_off_level', 0)
-        self.declare_parameter('release_pulse_sec', 1.0)
+        self.declare_parameter('release_pulse_sec', 0.5)
 
         pick_targets_topic = self.get_parameter('pick_targets_topic').value
         pick_labels_topic = self.get_parameter('pick_labels_topic').value
@@ -67,6 +67,9 @@ class TestColorSorter(Node):
         self.vision_capture_sec = float(self.get_parameter('vision_capture_sec').value)
         self.max_abs_workspace_x = float(self.get_parameter('max_abs_workspace_x').value)
         self.max_abs_workspace_y = float(self.get_parameter('max_abs_workspace_y').value)
+        self.max_workspace_xy_radius_mm = float(self.get_parameter('max_workspace_xy_radius_mm').value)
+        self.command_timeout_sec = 2.0
+        self.sync_timeout_sec = 30.0
         self.pump_on_level = int(self.get_parameter('pump_on_level').value)
         self.pump_off_level = int(self.get_parameter('pump_off_level').value)
         self.solenoid_on_level = int(self.get_parameter('solenoid_on_level').value)
@@ -75,6 +78,7 @@ class TestColorSorter(Node):
 
         # ROS service clients
         self.movj_client = self.create_client(MovJ, '/bringup/srv/MovJ')
+        self.sync_client = self.create_client(Sync, '/bringup/srv/Sync')
         self.tool_do_client = self.create_client(ToolDO, '/bringup/srv/ToolDO')
         self.clear_error_client = self.create_client(ClearError, '/bringup/srv/ClearError')
         self.enable_robot_client = self.create_client(EnableRobot, '/bringup/srv/EnableRobot')
@@ -89,6 +93,8 @@ class TestColorSorter(Node):
         self.halted_on_error = False
         self.accept_vision_updates = False
         self.vision_lock = threading.Lock()
+        self.max_empty_scan_cycles = 5
+        self.empty_scan_cycles = 0
 
         # Subscriptions
         self.create_subscription(PoseArray, pick_targets_topic, self._targets_cb, 10)
@@ -106,9 +112,6 @@ class TestColorSorter(Node):
             return
         with self.vision_lock:
             self.latest_targets = msg
-        self.get_logger().info(
-            f"Received {len(msg.poses)} pick targets (frame='{msg.header.frame_id}')"
-        )
 
     def _labels_cb(self, msg: String):
         """Receive labels from vision"""
@@ -139,6 +142,11 @@ class TestColorSorter(Node):
             # Extract color from label
             color = self._extract_color(label)
 
+            # Extract yaw from orientation
+            q = pose.orientation
+            roll, pitch, yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+            r_value = math.degrees(yaw)
+
             cards.append({
                 'id': i,
                 'color': color,
@@ -146,7 +154,7 @@ class TestColorSorter(Node):
                     'x': float(pose.position.x),
                     'y': float(pose.position.y),
                     'z': self.default_pick_z,
-                    'r': self.default_pick_r
+                    'r': r_value
                 }
             })
 
@@ -162,9 +170,14 @@ class TestColorSorter(Node):
 
     def _is_reasonable_workspace_pose(self, pose_dict: Dict) -> bool:
         """Reject obvious pixel-space values before sending robot motion commands."""
-        x = abs(float(pose_dict['x']))
-        y = abs(float(pose_dict['y']))
-        return x <= self.max_abs_workspace_x and y <= self.max_abs_workspace_y
+        x = float(pose_dict['x'])
+        y = float(pose_dict['y'])
+        radial_xy = math.hypot(x, y)
+        return (
+            abs(x) <= self.max_abs_workspace_x
+            and abs(y) <= self.max_abs_workspace_y
+            and radial_xy <= self.max_workspace_xy_radius_mm
+        )
 
     def _wait_for_future(self, future, timeout: float = 2.0) -> Tuple[bool, Optional[object]]:
         """Wait for a ROS service future and return (ok, result)."""
@@ -216,7 +229,6 @@ class TestColorSorter(Node):
             return None
 
         err = extract_first_int(raw_res)
-        self.get_logger().info(f'GetErrorID raw={raw_res!r} parsed={err}')
         return err
 
     def _post_command_error_check(self, command_name: str) -> bool:
@@ -238,14 +250,23 @@ class TestColorSorter(Node):
 
         return True
 
-    def _call_service_sync(self, client, request, *, command_name: str = 'command', check_error: bool = True) -> bool:
-        """Call ROS service synchronously with timeout and optional post-command error check."""
+    def _call_service_sync(
+        self,
+        client,
+        request,
+        *,
+        command_name: str = 'command',
+        check_error: bool = True,
+        wait_for_sync: bool = True,
+    ) -> bool:
+        """Call ROS service synchronously, then wait for robot sync when requested."""
         if not client.wait_for_service(timeout_sec=1.0):
             self.get_logger().warn(f'Service {client.srv_name} not available')
             return False
 
         future = client.call_async(request)
-        ok, result = self._wait_for_future(future, timeout=2.0)
+        timeout_sec = self.sync_timeout_sec if client == self.sync_client else self.command_timeout_sec
+        ok, result = self._wait_for_future(future, timeout=timeout_sec)
         if not ok:
             self.get_logger().error(f'Service call timeout/failure: {client.srv_name}')
             return False
@@ -254,20 +275,48 @@ class TestColorSorter(Node):
             self.get_logger().error(f'Service call returned no result: {client.srv_name}')
             return False
 
+        if wait_for_sync and client != self.sync_client:
+            sync_req = Sync.Request()
+            if not self._call_service_sync(
+                self.sync_client,
+                sync_req,
+                command_name='Sync',
+                check_error=False,
+                wait_for_sync=False,
+            ):
+                self.get_logger().error(f'Robot sync failed after {command_name}')
+                return False
+
         if check_error:
             return self._post_command_error_check(command_name)
 
         return True
 
     def pickup_sequence(self):
-        """Pump on and hold - waits for completion"""
+        """Descend to pickup height, activate suction, then lift back up."""
+        self.get_logger().info('>>> MOVE DOWN TO PICKUP HEIGHT')
+        pick_pose = {
+            'x': self.current_pick_pose['x'],
+            'y': self.current_pick_pose['y'],
+            'z': 111.0,
+            'r': self.current_pick_pose['r'],
+        }
+        if not self.movj(pick_pose):
+            self.get_logger().error('Failed to move down to pickup height')
+            return False
+
         self.get_logger().info('>>> PUMP ON')
         req = ToolDO.Request()
         req.index = PUMP_PIN
         req.status = self.pump_on_level
         if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO pump on'):
             return False
-        time.sleep(1.0)
+
+        self.get_logger().info('>>> LIFT BACK TO PICK HEIGHT')
+        if not self.movj(self.current_pick_pose):
+            self.get_logger().error('Failed to lift back to pickup height')
+            return False
+
         return True
 
     def release_sequence(self):
@@ -303,7 +352,7 @@ class TestColorSorter(Node):
         req.z = pose_dict['z']
         req.r = pose_dict['r']
         req.param_value = []
-        
+
         return self._call_service_sync(self.movj_client, req, command_name='MovJ')
 
     def get_priority_list(self, cards: List[Dict]) -> List[Dict]:
@@ -402,8 +451,20 @@ class TestColorSorter(Node):
                 self.detected_cards = self._capture_targets_at_home()
 
                 if not self.detected_cards:
+                    self.empty_scan_cycles += 1
+                    self.get_logger().warn(
+                        f'No cards detected this cycle ({self.empty_scan_cycles}/{self.max_empty_scan_cycles})'
+                    )
+                    if self.empty_scan_cycles >= self.max_empty_scan_cycles:
+                        self.halted_on_error = True
+                        self.get_logger().error(
+                            'No cards detected for 5 consecutive cycles. Halting sorter. '
+                            'Confirm vision stream/poses and restart node.'
+                        )
                     time.sleep(1.0)
                     continue
+
+                self.empty_scan_cycles = 0
 
                 self.busy = True
 
@@ -432,6 +493,7 @@ class TestColorSorter(Node):
                     time.sleep(1.0)
 
                     # Pickup
+                    self.current_pick_pose = dict(target['pos'])
                     if not self.pickup_sequence():
                         self.get_logger().error('Pickup sequence failed')
                         cycle_failed = True

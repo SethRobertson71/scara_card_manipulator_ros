@@ -180,7 +180,7 @@ void M1ProRobot::movJ(const std::shared_ptr<m1pro_bringup::srv::MovJ::Request> r
 {
     try {
         char cmd[512];
-        snprintf(cmd, sizeof(cmd), "MovJ(%.3f,%.3f,%.3f,%.3f,1)", req->x, req->y, req->z, req->r);
+        snprintf(cmd, sizeof(cmd), "MovJ(%.3f,%.3f,%.3f,%.3f,AccJ=60)", req->x, req->y, req->z, req->r);
         std::string full = std::string(cmd);
         for (const auto& p : req->param_value) full += "," + p;
         full += ")";

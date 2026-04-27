@@ -26,9 +26,9 @@ SOLENOID_PIN = 3
 
 # Bin Coordinates
 BINS = {
-    "red": {"x": -20.0, "y": -306.0, "z": 140.0, "r": -90.0},
-    "purple": {"x": 105.0, "y": -315.0, "z": 140.0, "r": -90.0},
-    "green": {"x": 233.0, "y": -318.0, "z": 140.0, "r": -90.0},
+    "purple": {"x": -20.0, "y": -306.0, "z": 140.0, "r": 90.0},
+    "red": {"x": 105.0, "y": -315.0, "z": 140.0, "r": 90.0},
+    "green": {"x": 233.0, "y": -318.0, "z": 140.0, "r": 90.0},
 }
 
 COLOR_FACE_VALUES = {
@@ -334,12 +334,25 @@ class TestColorSorter(Node):
             self.get_logger().error('Recovery failed: EnableRobot command failed')
             return False
 
+        speed_req = SpeedFactor.Request()
+        speed_req.ratio = max(1, min(100, int(self.speed_factor)))
+        if not self._call_service_sync(
+            self.speed_factor_client,
+            speed_req,
+            command_name=f'SpeedFactor(recovery={speed_req.ratio})',
+            check_error=False,
+            wait_for_sync=False,
+        ):
+            self.get_logger().error('Recovery failed: could not restore default speed factor')
+            return False
+
         return True
 
     def _handle_movj_error_18_recovery(self) -> bool:
         """Recover from MovJ alarm 18 by re-enabling and returning to home."""
         recovery_home_pose = self._home_pose()
         recovery_home_pose['x'] -= 10.0
+        recovery_home_pose['z'] = self.default_pick_z
 
         self.get_logger().warn(
             f'MovJ error_id=18 detected. Running recovery: ClearError -> EnableRobot -> '
@@ -420,6 +433,7 @@ class TestColorSorter(Node):
             req,
             command_name='MovJ',
             check_error=False,
+            wait_for_sync=False,
         )
 
     def _call_service_sync(
@@ -481,7 +495,11 @@ class TestColorSorter(Node):
         req = ToolDO.Request()
         req.index = PUMP_PIN
         req.status = self.pump_on_level
-        if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO pump on'):
+        if not self._call_service_sync(
+            self.tool_do_client,
+            req,
+            command_name='ToolDO pump on',
+        ):
             return False
 
         self.get_logger().info(f'>>> SET LIFT SPEED FACTOR {self.lift_speed_factor}%')
@@ -510,19 +528,31 @@ class TestColorSorter(Node):
         req = ToolDO.Request()
         req.index = PUMP_PIN
         req.status = self.pump_off_level
-        if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO pump off'):
+        if not self._call_service_sync(
+            self.tool_do_client,
+            req,
+            command_name='ToolDO pump off',
+        ):
             return False
 
         # Solenoid on
         req.index = SOLENOID_PIN
         req.status = self.solenoid_on_level
-        if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO solenoid on'):
+        if not self._call_service_sync(
+            self.tool_do_client,
+            req,
+            command_name='ToolDO solenoid on',
+        ):
             return False
         time.sleep(self.release_pulse_sec)
 
         # Solenoid off
         req.status = self.solenoid_off_level
-        if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO solenoid off'):
+        if not self._call_service_sync(
+            self.tool_do_client,
+            req,
+            command_name='ToolDO solenoid off',
+        ):
             return False
 
         return True

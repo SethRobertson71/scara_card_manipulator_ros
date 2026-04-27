@@ -25,3 +25,5 @@ Thumbs.db
 
 # ROS 2 generated metadata that can appear in source trees
 *.launch.py[co]
+
+.github/

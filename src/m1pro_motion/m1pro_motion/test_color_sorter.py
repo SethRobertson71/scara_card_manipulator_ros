@@ -6,6 +6,7 @@ Adapted from Dobot_Color_SortingV2.py to work with ROS pick_targets and labels
 
 import json
 import math
+import re
 import time
 import threading
 from typing import List, Dict, Optional, Tuple
@@ -15,7 +16,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseArray
 from std_msgs.msg import String
 
-from m1pro_bringup.srv import MovJ, ToolDO, Sync, ClearError, EnableRobot, GetErrorID
+from m1pro_bringup.srv import MovJ, ToolDO, Sync, ClearError, EnableRobot, GetErrorID, SpeedFactor, SetArmOrientation 
 from tf_transformations import euler_from_quaternion
 
 
@@ -30,13 +31,20 @@ BINS = {
     "green": {"x": 233.0, "y": -318.0, "z": 140.0, "r": -90.0},
 }
 
+COLOR_FACE_VALUES = {
+    'green': [1, 2, 3, 4],
+    'red': [5, 6, 7, 8],
+    'purple': [9, 10, 11, 12],
+}
+
 class TestColorSorter(Node):
     def __init__(self):
         super().__init__('test_color_sorter')
 
         self.declare_parameter('pick_targets_topic', '/world/card_poses')
         self.declare_parameter('pick_labels_topic', '/skipbo/pick_target_labels')
-        self.declare_parameter('speed_factor', 90)
+        self.declare_parameter('speed_factor', 80)
+        self.declare_parameter('lift_speed_factor', 30)
         self.declare_parameter('default_pick_z', 140.0)
         self.declare_parameter('default_pick_r', 0.0)
         self.declare_parameter('home_x', 400.0)
@@ -57,6 +65,7 @@ class TestColorSorter(Node):
         pick_targets_topic = self.get_parameter('pick_targets_topic').value
         pick_labels_topic = self.get_parameter('pick_labels_topic').value
         self.speed_factor = int(self.get_parameter('speed_factor').value)
+        self.lift_speed_factor = int(self.get_parameter('lift_speed_factor').value)
         self.default_pick_z = float(self.get_parameter('default_pick_z').value)
         self.default_pick_r = float(self.get_parameter('default_pick_r').value)
         self.home_x = float(self.get_parameter('home_x').value)
@@ -83,6 +92,8 @@ class TestColorSorter(Node):
         self.clear_error_client = self.create_client(ClearError, '/bringup/srv/ClearError')
         self.enable_robot_client = self.create_client(EnableRobot, '/bringup/srv/EnableRobot')
         self.get_error_id_client = self.create_client(GetErrorID, '/bringup/srv/GetErrorID')
+        self.speed_factor_client = self.create_client(SpeedFactor, '/bringup/srv/SpeedFactor')
+        self.set_arm_orientation_client = self.create_client(SetArmOrientation, '/bringup/srv/SetArmOrientation')
 
         # State
         self.detected_cards: List[Dict] = []
@@ -141,6 +152,7 @@ class TestColorSorter(Node):
 
             # Extract color from label
             color = self._extract_color(label)
+            face_value = self._extract_face_value(label)
 
             # Extract yaw from orientation
             q = pose.orientation
@@ -149,7 +161,9 @@ class TestColorSorter(Node):
 
             cards.append({
                 'id': i,
+                'label': label,
                 'color': color,
+                'face_value': face_value,
                 'pos': {
                     'x': float(pose.position.x),
                     'y': float(pose.position.y),
@@ -167,6 +181,52 @@ class TestColorSorter(Node):
             if color in label_lower:
                 return color
         return 'red'  # default color
+
+    def _extract_face_value(self, label: str) -> Optional[int]:
+        """Extract card face value from labels like 'green_7'; returns None when unknown."""
+        match = re.search(r'(\d+)(?!.*\d)', str(label))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _infer_missing_face_values(self, cards: List[Dict]) -> List[Dict]:
+        """Fill one missing face value when 4 cards of one color leave exactly one unknown."""
+        cards_by_color: Dict[str, List[Dict]] = {}
+        for card in cards:
+            cards_by_color.setdefault(card.get('color', ''), []).append(card)
+
+        for color, color_cards in cards_by_color.items():
+            expected_values = COLOR_FACE_VALUES.get(color)
+            if not expected_values or len(color_cards) != 4:
+                continue
+
+            known_values = []
+            unknown_cards = []
+            for card in color_cards:
+                face_value = card.get('face_value')
+                if isinstance(face_value, int):
+                    known_values.append(face_value)
+                else:
+                    unknown_cards.append(card)
+
+            if len(unknown_cards) != 1 or len(known_values) != 3:
+                continue
+
+            missing_values = [value for value in expected_values if value not in known_values]
+            if len(missing_values) != 1:
+                continue
+
+            missing_value = missing_values[0]
+            unknown_card = unknown_cards[0]
+            unknown_card['face_value'] = missing_value
+            self.get_logger().info(
+                f"Inferred missing {color} card face value {missing_value} from known values {sorted(known_values)}"
+            )
+
+        return cards
 
     def _is_reasonable_workspace_pose(self, pose_dict: Dict) -> bool:
         """Reject obvious pixel-space values before sending robot motion commands."""
@@ -250,6 +310,118 @@ class TestColorSorter(Node):
 
         return True
 
+    def _rearm_robot_for_recovery(self) -> bool:
+        """Clear faults and re-enable robot before each recovery motion attempt."""
+        req = ClearError.Request()
+        if not self._call_service_sync(
+            self.clear_error_client,
+            req,
+            command_name='ClearError(recovery)',
+            check_error=False,
+            wait_for_sync=False,
+        ):
+            self.get_logger().error('Recovery failed: ClearError command failed')
+            return False
+
+        req = EnableRobot.Request()
+        if not self._call_service_sync(
+            self.enable_robot_client,
+            req,
+            command_name='EnableRobot(recovery)',
+            check_error=False,
+            wait_for_sync=False,
+        ):
+            self.get_logger().error('Recovery failed: EnableRobot command failed')
+            return False
+
+        return True
+
+    def _handle_movj_error_18_recovery(self) -> bool:
+        """Recover from MovJ alarm 18 by re-enabling and returning to home."""
+        recovery_home_pose = self._home_pose()
+        recovery_home_pose['x'] -= 10.0
+
+        self.get_logger().warn(
+            f'MovJ error_id=18 detected. Running recovery: ClearError -> EnableRobot -> '
+            f"Move home({recovery_home_pose['x']:.1f},{recovery_home_pose['y']:.1f},{recovery_home_pose['z']:.1f})."
+        )
+
+        if not self._rearm_robot_for_recovery():
+            return False
+
+        if not self._movj_raw(recovery_home_pose):
+            self.get_logger().error('Recovery failed: could not move to recovery home pose')
+            return False
+
+        err = self._read_robot_error_id()
+        if err is None:
+            self.get_logger().error('Recovery failed: unable to verify robot error state')
+            return False
+        if err != 0:
+            self.get_logger().error(f'Recovery failed: robot still reports error_id={err}')
+            return False
+
+        return True
+
+    def _set_arm_orientation_l_or_r(self, l_or_r: int) -> bool:
+        """Set left/right arm orientation while keeping other orientation fields fixed."""
+        req = SetArmOrientation.Request()
+        req.l_or_r = int(l_or_r)
+        req.u_or_d = 0
+        req.f_or_n = 0
+        req.config6 = 0
+
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            if not self.set_arm_orientation_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn('Service /bringup/srv/SetArmOrientation not available')
+                return False
+
+            future = self.set_arm_orientation_client.call_async(req)
+            ok, result = self._wait_for_future(future, timeout=self.command_timeout_sec)
+            if not ok or result is None:
+                self.get_logger().error('SetArmOrientation call failed or timed out')
+                return False
+
+            res_code = getattr(result, 'res', None)
+            if res_code == -10000 and attempt < max_attempts:
+                self.get_logger().warn(
+                    'SetArmOrientation returned -10000, retrying once'
+                )
+                continue
+
+            if res_code == -10000:
+                self.get_logger().error('SetArmOrientation returned -10000 after retry')
+                return False
+
+            err = self._read_robot_error_id()
+            if err is None:
+                self.get_logger().error('Unable to read GetErrorID after SetArmOrientation')
+                return False
+            if err != 0:
+                self.get_logger().warn(
+                    f'GetErrorID after SetArmOrientation is {err}; continuing recovery flow'
+                )
+
+            return True
+
+        return False
+
+    def _movj_raw(self, pose_dict: Dict) -> bool:
+        """Send one MovJ command and wait for completion without implicit error policy."""
+        req = MovJ.Request()
+        req.x = pose_dict['x']
+        req.y = pose_dict['y']
+        req.z = pose_dict['z']
+        req.r = pose_dict['r']
+        req.param_value = []
+        return self._call_service_sync(
+            self.movj_client,
+            req,
+            command_name='MovJ',
+            check_error=False,
+        )
+
     def _call_service_sync(
         self,
         client,
@@ -312,9 +484,20 @@ class TestColorSorter(Node):
         if not self._call_service_sync(self.tool_do_client, req, command_name='ToolDO pump on'):
             return False
 
+        self.get_logger().info(f'>>> SET LIFT SPEED FACTOR {self.lift_speed_factor}%')
+        if not self.set_speed_factor(self.lift_speed_factor):
+            self.get_logger().error('Failed to set lift speed factor')
+            return False
+
         self.get_logger().info('>>> LIFT BACK TO PICK HEIGHT')
         if not self.movj(self.current_pick_pose):
             self.get_logger().error('Failed to lift back to pickup height')
+            self.set_speed_factor(self.speed_factor)
+            return False
+
+        self.get_logger().info(f'>>> RESTORE SPEED FACTOR {self.speed_factor}%')
+        if not self.set_speed_factor(self.speed_factor):
+            self.get_logger().error('Failed to restore default speed factor')
             return False
 
         return True
@@ -345,20 +528,111 @@ class TestColorSorter(Node):
         return True
 
     def movj(self, pose_dict: Dict) -> bool:
-        """Execute MovJ command - waits for robot to complete before returning"""
-        req = MovJ.Request()
-        req.x = pose_dict['x']
-        req.y = pose_dict['y']
-        req.z = pose_dict['z']
-        req.r = pose_dict['r']
-        req.param_value = []
+        """Execute MovJ with error-18 recovery via home return and orientation toggling."""
+        if not self._movj_raw(pose_dict):
+            self.get_logger().error('MovJ command failed before error-state check')
+            self.halted_on_error = True
+            return False
 
-        return self._call_service_sync(self.movj_client, req, command_name='MovJ')
+        err = self._read_robot_error_id()
+        if err is None:
+            self.get_logger().error('Unable to verify error state after MovJ; halting for safety.')
+            self.halted_on_error = True
+            return False
+
+        if err == 0:
+            return True
+
+        if err != 18:
+            self.get_logger().error(f'Robot error active after MovJ: error_id={err}. Halting sorter.')
+            self.halted_on_error = True
+            return False
+
+        if not self._handle_movj_error_18_recovery():
+            self.halted_on_error = True
+            return False
+
+        retry_orientations = [None, 1, 0]
+        for idx, orientation in enumerate(retry_orientations, start=1):
+            if orientation is None:
+                self.get_logger().warn(
+                    f'Error-18 retry attempt {idx}/{len(retry_orientations)}: '
+                    'from recovery home, retry move to target pose'
+                )
+            else:
+                self.get_logger().warn(
+                    f'Error-18 retry attempt {idx}/{len(retry_orientations)}: '
+                    f'switch SetArmOrientation l_or_r={orientation}, move home, then retry target pose'
+                )
+                if not self._set_arm_orientation_l_or_r(orientation):
+                    self.get_logger().error(
+                        f'Failed to set arm orientation l_or_r={orientation} during error-18 retry'
+                    )
+                if not self._handle_movj_error_18_recovery():
+                    self.halted_on_error = True
+                    return False
+
+            # Policy: every recovery-path move attempt must be preceded by rearm.
+            if not self._rearm_robot_for_recovery():
+                self.halted_on_error = True
+                return False
+
+            if self._movj_raw(pose_dict):
+                retry_err = self._read_robot_error_id()
+                if retry_err is None:
+                    self.get_logger().error(
+                        'Unable to verify error state after MovJ retry; halting for safety.'
+                    )
+                    self.halted_on_error = True
+                    return False
+                if retry_err == 0:
+                    return True
+                if retry_err != 18:
+                    self.get_logger().error(
+                        f'Robot error active after MovJ retry: error_id={retry_err}. Halting sorter.'
+                    )
+                    self.halted_on_error = True
+                    return False
+            else:
+                self.get_logger().error('MovJ retry command failed before error-state check')
+
+            if idx < len(retry_orientations):
+                self.get_logger().warn(
+                    'MovJ retry still hit error_id=18. Next attempt will switch orientation, move home, then retry target pose.'
+                )
+
+        self.get_logger().error(
+            'MovJ retry failed after orientation toggles l_or_r=0 -> 1 -> 0. Halting sorter.'
+        )
+        self.halted_on_error = True
+        return False
+
+    def set_speed_factor(self, ratio: int) -> bool:
+        """Set robot global speed factor (1-100)."""
+        ratio_clamped = max(1, min(100, int(ratio)))
+        if ratio_clamped != ratio:
+            self.get_logger().warn(f'Clamped speed factor from {ratio} to {ratio_clamped}')
+
+        req = SpeedFactor.Request()
+        req.ratio = ratio_clamped
+        return self._call_service_sync(
+            self.speed_factor_client,
+            req,
+            command_name=f'SpeedFactor({ratio_clamped})',
+            wait_for_sync=False,
+        )
 
     def get_priority_list(self, cards: List[Dict]) -> List[Dict]:
-        """Sort cards by Green(1-4), Red(5-8), Purple(9-12)"""
+        """Sort cards by color group, then by ascending card face value."""
         color_order = {"green": 1, "red": 2, "purple": 3}
-        return sorted(cards, key=lambda x: (color_order.get(x['color'], 99), x['id']))
+        return sorted(
+            cards,
+            key=lambda x: (
+                color_order.get(x['color'], 99),
+                x['face_value'] if x['face_value'] is not None else 999,
+                x['id'],
+            ),
+        )
 
     def _home_pose(self) -> Dict:
         return {
@@ -392,6 +666,7 @@ class TestColorSorter(Node):
             snapshot_labels = list(self.latest_labels)
 
         cards = self._convert_to_detected_cards(snapshot_targets, snapshot_labels)
+        cards = self._infer_missing_face_values(cards)
         self.get_logger().info(f'Captured {len(cards)} target(s) at home scan window')
         return cards
 
@@ -416,6 +691,14 @@ class TestColorSorter(Node):
             self.halted_on_error = True
             return
         time.sleep(1.0)
+
+        # Set default runtime speed factor
+        self.get_logger().info(f'Setting default speed factor to {self.speed_factor}%')
+        if not self.set_speed_factor(self.speed_factor):
+            self.get_logger().error('Failed to set default speed factor')
+            self.halted_on_error = True
+            return
+        time.sleep(0.5)
 
         if not self.movj(self._home_pose()):
             self.get_logger().error('Failed initial move to home position')
@@ -475,7 +758,11 @@ class TestColorSorter(Node):
                 # Process each card - synchronously waits for robot to finish each step
                 while queue:
                     target = queue.pop(0)
-                    self.get_logger().info(f"Processing Card {target['id']} ({target['color']})")
+                    face_value = target.get('face_value')
+                    value_text = str(face_value) if face_value is not None else 'unknown'
+                    self.get_logger().info(
+                        f"Processing Card {target['id']} ({target['color']} {value_text})"
+                    )
 
                     if not self._is_reasonable_workspace_pose(target['pos']):
                         self.get_logger().error(

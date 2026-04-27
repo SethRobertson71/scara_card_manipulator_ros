@@ -116,6 +116,7 @@ private:
     void sync(const std::shared_ptr<m1pro_bringup::srv::Sync::Request> req, std::shared_ptr<m1pro_bringup::srv::Sync::Response> res);
     void syncAll(const std::shared_ptr<m1pro_bringup::srv::SyncAll::Request> req, std::shared_ptr<m1pro_bringup::srv::SyncAll::Response> res);
     void relJointMovJ(const std::shared_ptr<m1pro_bringup::srv::RelJointMovJ::Request> req, std::shared_ptr<m1pro_bringup::srv::RelJointMovJ::Response> res);
+    void setArmOrientation(const std::shared_ptr<m1pro_bringup::srv::SetArmOrientation::Request> req, std::shared_ptr<m1pro_bringup::srv::SetArmOrientation::Response> res);
 
     static int str2Int(const char* val);
 };

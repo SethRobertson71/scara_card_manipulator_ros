@@ -13,7 +13,7 @@ Published topics:
   /skipbo/detections         (vision_msgs/Detection2DArray)
   /skipbo/pick_targets       (geometry_msgs/PoseArray) - camera-frame card poses
   /skipbo/pick_target_labels (std_msgs/StringMultiArray) - labels per target
-  /camera/skipbo_annotated   (sensor_msgs/Image)
+    /camera/skipbo_annotated   (sensor_msgs/Image)
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ class SkipboVisionNode(Node):
         self.declare_parameter("pick_targets_topic", "/skipbo/pick_targets")
         self.declare_parameter("pick_labels_topic", "/skipbo/pick_target_labels")
         self.declare_parameter("annotated_topic", "/camera/skipbo_annotated")
+        self.declare_parameter("annotated_publish_scale", 0.5)
         self.declare_parameter("template_roi_topic", "/camera/skipbo_template_roi")
 
         self.declare_parameter("white_s_max", 45)
@@ -89,7 +90,6 @@ class SkipboVisionNode(Node):
         self.declare_parameter("template_roi_h", 0.72)
         self.declare_parameter("template_roi_scales", [0.9, 1.0, 1.1])
         self.declare_parameter("min_template_score", 0.45)
-        self.declare_parameter("rotate_landscape_cards", True)
         self.declare_parameter("match_upside_down_cards", True)
         self.declare_parameter("use_glare_robust_preprocess", True)
         self.declare_parameter("use_color_number_prior", True)
@@ -112,6 +112,9 @@ class SkipboVisionNode(Node):
         pick_targets_topic = self.get_parameter("pick_targets_topic").value
         pick_labels_topic = self.get_parameter("pick_labels_topic").value
         annotated_topic = self.get_parameter("annotated_topic").value
+        self.annotated_publish_scale = float(
+            self.get_parameter("annotated_publish_scale").value
+        )
         template_roi_topic = self.get_parameter("template_roi_topic").value
 
         self.white_s_max = int(self.get_parameter("white_s_max").value)
@@ -143,7 +146,6 @@ class SkipboVisionNode(Node):
         if not self.template_roi_scales:
             self.template_roi_scales = [1.0]
         self.min_template_score = float(self.get_parameter("min_template_score").value)
-        self.rotate_landscape_cards = bool(self.get_parameter("rotate_landscape_cards").value)
         self.match_upside_down_cards = bool(self.get_parameter("match_upside_down_cards").value)
         self.use_glare_robust_preprocess = bool(
             self.get_parameter("use_glare_robust_preprocess").value
@@ -201,7 +203,8 @@ class SkipboVisionNode(Node):
 
         self.get_logger().info(
             f"Skip-Bo node ready - image_topic={image_topic}, mode=color_plus_template, "
-            f"templates={len(self.templates)}, rate={publish_rate}Hz"
+            f"templates={len(self.templates)}, rate={publish_rate}Hz, "
+            f"annotated_scale={self.annotated_publish_scale:.2f}"
         )
 
     def _load_templates(self, template_dir: str) -> Dict[int, np.ndarray]:
@@ -249,28 +252,6 @@ class SkipboVisionNode(Node):
         variants.append(otsu)
         return variants
 
-    def _normalize_card_orientation(self, card_bgr: np.ndarray) -> np.ndarray:
-        if not self.rotate_landscape_cards:
-            return card_bgr
-
-        hsv = cv2.cvtColor(card_bgr, cv2.COLOR_BGR2HSV)
-        white_mask = cv2.inRange(hsv, (0, 0, 140), (180, 60, 255))
-
-        ys, xs = np.where(white_mask > 0)
-        if len(xs) < 100:
-            return card_bgr
-
-        pts = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
-        _, eigenvectors, _ = cv2.PCACompute2(pts, mean=None)
-        vx, vy = eigenvectors[0]
-
-        # Use the card body's major axis, which is dominated by the white field.
-        angle_deg = abs(np.degrees(np.arctan2(vy, vx)))
-        if angle_deg < 45.0:
-            return cv2.rotate(card_bgr, cv2.ROTATE_90_CLOCKWISE)
-
-        return card_bgr
-
     def _classify_color(self, card_bgr: np.ndarray) -> Tuple[str, float, Dict[str, float]]:
         h, w = card_bgr.shape[:2]
         x0 = int(0.2 * w)
@@ -286,7 +267,7 @@ class SkipboVisionNode(Node):
 
         green_mask = cv2.inRange(hsv, (35, 50, 40), (90, 255, 255))
         red_mask_1 = cv2.inRange(hsv, (0, 50, 40), (15, 255, 255))
-        red_mask_2 = cv2.inRange(hsv, (160, 50, 40), (180, 255, 255))
+        red_mask_2 = cv2.inRange(hsv, (170, 60, 40), (180, 255, 255))
         purple_mask = cv2.inRange(hsv, (125, 50, 40), (165, 255, 255))
 
         green_pixels = int(cv2.countNonZero(cv2.bitwise_and(green_mask, color_mask)))
@@ -367,8 +348,7 @@ class SkipboVisionNode(Node):
         return rois
 
     def _publish_template_roi(self, card_bgr: np.ndarray, msg: Image) -> None:
-        normalized_card = self._normalize_card_orientation(card_bgr)
-        roi = self._extract_template_roi(normalized_card)
+        roi = self._extract_template_roi(card_bgr)
         roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         roi_bin = self._preprocess_digit_variants(roi_gray)[0]
         roi_msg = self.bridge.cv2_to_imgmsg(roi_bin, encoding="mono8")
@@ -446,7 +426,7 @@ class SkipboVisionNode(Node):
             return None
 
         rect = cv2.minAreaRect(contour)
-        (_, _), (rw, rh), theta = rect
+        (_, _), (rw, rh), _theta = rect
         if rw <= 1.0 or rh <= 1.0:
             return None
 
@@ -481,10 +461,22 @@ class SkipboVisionNode(Node):
             ],
             dtype=np.float32,
         )
+        src_w = np.linalg.norm(src[1] - src[0])
+        src_h = np.linalg.norm(src[3] - src[0])
+        if src_w > src_h:
+            # Landscape quad: rotate mapping to keep the rectified output portrait.
+            dst = np.array(
+                [
+                    [0, self.rect_h - 1],
+                    [0, 0],
+                    [self.rect_w - 1, 0],
+                    [self.rect_w - 1, self.rect_h - 1],
+                ],
+                dtype=np.float32,
+            )
 
         transform = cv2.getPerspectiveTransform(src, dst)
         card = cv2.warpPerspective(frame, transform, (self.rect_w, self.rect_h))
-        card = self._normalize_card_orientation(card)
 
         self._publish_template_roi(card, msg)
 
@@ -498,24 +490,35 @@ class SkipboVisionNode(Node):
             label = f"{color}_{number}"
             score = color_score * number_score
 
-        det = self._build_detection(msg, center_x, center_y, float(rw), float(rh), label, score)
+        det = self._build_detection(
+            msg,
+            center_x,
+            center_y,
+            float(short_side),
+            float(long_side),
+            label,
+            score,
+        )
         detections_msg.detections.append(det)
 
         box_i = box.astype(int)
-        cv2.polylines(annotated, [box_i], True, (0, 255, 255), 2)
+        cv2.polylines(annotated, [box_i], True, (0, 0, 255), 2)
         cv2.putText(
             annotated,
-            f"{label}:{score:.2f}",
+            f"{label}", #:{score:.2f}
             (box_i[0][0], box_i[0][1] - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 255),
+            1.5,
+            (0, 0, 255),
             2,
             cv2.LINE_AA,
         )
         cv2.circle(annotated, (int(center_x), int(center_y)), 4, (0, 255, 0), -1)
-        # Return pose data: (pixel_x, pixel_y, theta_radians, label, confidence)
-        theta_rad = np.radians(float(theta))
+        # Use the long card edge as orientation, apply -90 degree offset,
+        # and normalize to [0, pi) i.e. [0, 180) degrees.
+        long_vec = (src[3] - src[0]) if src_h >= src_w else (src[1] - src[0])
+        theta_raw = np.arctan2(long_vec[1], long_vec[0]) - (0.5 * np.pi)
+        theta_rad = float((-theta_raw) % np.pi)
         return (center_x, center_y, theta_rad, label, score)
 
     def _split_overlap_cluster(
@@ -731,6 +734,12 @@ class SkipboVisionNode(Node):
                         f"'{self.workspace_frame}': {e}"
                     )
                     self._last_tf_warn_ns = now_ns
+
+        if 0.0 < self.annotated_publish_scale < 1.0:
+            annotated_h, annotated_w = annotated.shape[:2]
+            scaled_w = max(1, int(round(annotated_w * self.annotated_publish_scale)))
+            scaled_h = max(1, int(round(annotated_h * self.annotated_publish_scale)))
+            annotated = cv2.resize(annotated, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
 
         annotated_img = self.bridge.cv2_to_imgmsg(annotated, "bgr8")
         annotated_img.header = msg.header

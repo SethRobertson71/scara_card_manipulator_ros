@@ -71,6 +71,7 @@ void M1ProRobot::init()
     REG_SRV(Sync,          Sync,          sync);
     REG_SRV(SyncAll,       SyncAll,       syncAll);
     REG_SRV(RelJointMovJ,  RelJointMovJ,  relJointMovJ);
+    REG_SRV(SetArmOrientation, SetArmOrientation, setArmOrientation);
     #undef REG_SRV
 
     RCLCPP_INFO(this->get_logger(), "M1Pro driver ready — %zu services registered", server_tbl_.size());
@@ -193,6 +194,18 @@ void M1ProRobot::syncAll(const std::shared_ptr<m1pro_bringup::srv::SyncAll::Requ
 
 void M1ProRobot::relJointMovJ(const std::shared_ptr<m1pro_bringup::srv::RelJointMovJ::Request> req, std::shared_ptr<m1pro_bringup::srv::RelJointMovJ::Response> res)
 { try { char cmd[64]; snprintf(cmd, sizeof(cmd), "RelJointMovJ(%.3f,%.3f,%.3f,%.3f)", req->offset1, req->offset2, req->offset3, req->offset4); commander_->motionDoCmd(cmd, res->res); } catch (const std::exception& e) { RCLCPP_ERROR(this->get_logger(), "relJointMovJ: %s", e.what()); res->res = -1; } }
+
+void M1ProRobot::setArmOrientation(const std::shared_ptr<m1pro_bringup::srv::SetArmOrientation::Request> req, std::shared_ptr<m1pro_bringup::srv::SetArmOrientation::Response> res)
+{
+    try {
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "SetArmOrientation(%d)", req->l_or_r);
+        commander_->motionDoCmd(cmd, res->res);
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "setArmOrientation: %s", e.what());
+        res->res = -1;
+    }
+}
 
 int M1ProRobot::str2Int(const char* val)
 {

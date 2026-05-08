@@ -51,7 +51,7 @@ class TestColorSorter(Node):
         self.declare_parameter('home_y', 0.0)
         self.declare_parameter('home_z', 240.0)
         self.declare_parameter('home_r', 0.0)
-        self.declare_parameter('home_settle_sec', 1.0)
+        self.declare_parameter('home_settle_sec', 0.5)
         self.declare_parameter('vision_capture_sec', 1.0)
         self.declare_parameter('max_abs_workspace_x', 600.0)
         self.declare_parameter('max_abs_workspace_y', 600.0)
@@ -60,7 +60,7 @@ class TestColorSorter(Node):
         self.declare_parameter('pump_off_level', 0)
         self.declare_parameter('solenoid_on_level', 1)
         self.declare_parameter('solenoid_off_level', 0)
-        self.declare_parameter('release_pulse_sec', 0.5)
+        self.declare_parameter('release_pulse_sec', 0.1)
 
         pick_targets_topic = self.get_parameter('pick_targets_topic').value
         pick_labels_topic = self.get_parameter('pick_labels_topic').value
@@ -348,34 +348,6 @@ class TestColorSorter(Node):
 
         return True
 
-    def _handle_movj_error_18_recovery(self) -> bool:
-        """Recover from MovJ alarm 18 by re-enabling and returning to home."""
-        recovery_home_pose = self._home_pose()
-        recovery_home_pose['x'] -= 10.0
-        recovery_home_pose['z'] = self.default_pick_z
-
-        self.get_logger().warn(
-            f'MovJ error_id=18 detected. Running recovery: ClearError -> EnableRobot -> '
-            f"Move home({recovery_home_pose['x']:.1f},{recovery_home_pose['y']:.1f},{recovery_home_pose['z']:.1f})."
-        )
-
-        if not self._rearm_robot_for_recovery():
-            return False
-
-        if not self._movj_raw(recovery_home_pose):
-            self.get_logger().error('Recovery failed: could not move to recovery home pose')
-            return False
-
-        err = self._read_robot_error_id()
-        if err is None:
-            self.get_logger().error('Recovery failed: unable to verify robot error state')
-            return False
-        if err != 0:
-            self.get_logger().error(f'Recovery failed: robot still reports error_id={err}')
-            return False
-
-        return True
-
     def _set_arm_orientation_l_or_r(self, l_or_r: int) -> bool:
         """Set left/right arm orientation while keeping other orientation fields fixed."""
         req = SetArmOrientation.Request()
@@ -557,8 +529,26 @@ class TestColorSorter(Node):
 
         return True
 
+    def _ensure_correct_orientation(self, target_y: float) -> bool:
+        """Check target y and set arm orientation: y > 0 → l_or_r=1, y < 0 → l_or_r=0"""
+        if target_y == 0:
+            # Skip check for y=0
+            return True
+        
+        desired_orientation = 1 if target_y > 0 else 0
+        self.get_logger().info(
+            f'Pre-move orientation check: target_y={target_y:.1f}, setting l_or_r={desired_orientation}'
+        )
+        return self._set_arm_orientation_l_or_r(desired_orientation)
+
     def movj(self, pose_dict: Dict) -> bool:
-        """Execute MovJ with error-18 recovery via home return and orientation toggling."""
+        """Execute MovJ with orientation check based on target y, then error-18 recovery via home return and orientation toggling."""
+        # Check and set arm orientation based on target y coordinate
+        if not self._ensure_correct_orientation(pose_dict['y']):
+            self.get_logger().error('Failed to set correct arm orientation before move')
+            self.halted_on_error = True
+            return False
+        
         if not self._movj_raw(pose_dict):
             self.get_logger().error('MovJ command failed before error-state check')
             self.halted_on_error = True
@@ -578,35 +568,22 @@ class TestColorSorter(Node):
             self.halted_on_error = True
             return False
 
-        if not self._handle_movj_error_18_recovery():
-            self.halted_on_error = True
-            return False
-
-        retry_orientations = [None, 1, 0]
+        # Error 18 recovery: try toggling arm orientation back and forth
+        self.get_logger().warn('Error-18 detected. Attempting recovery via orientation toggle.')
+        
+        retry_orientations = [0, 1]
         for idx, orientation in enumerate(retry_orientations, start=1):
-            if orientation is None:
-                self.get_logger().warn(
-                    f'Error-18 retry attempt {idx}/{len(retry_orientations)}: '
-                    'from recovery home, retry move to target pose'
+            self.get_logger().warn(
+                f'Error-18 retry attempt {idx}/{len(retry_orientations)}: '
+                f'set l_or_r={orientation} and retry target move'
+            )
+            
+            if not self._set_arm_orientation_l_or_r(orientation):
+                self.get_logger().error(
+                    f'Failed to set arm orientation l_or_r={orientation} during error-18 retry'
                 )
-            else:
-                self.get_logger().warn(
-                    f'Error-18 retry attempt {idx}/{len(retry_orientations)}: '
-                    f'switch SetArmOrientation l_or_r={orientation}, move home, then retry target pose'
-                )
-                if not self._set_arm_orientation_l_or_r(orientation):
-                    self.get_logger().error(
-                        f'Failed to set arm orientation l_or_r={orientation} during error-18 retry'
-                    )
-                if not self._handle_movj_error_18_recovery():
-                    self.halted_on_error = True
-                    return False
-
-            # Policy: every recovery-path move attempt must be preceded by rearm.
-            if not self._rearm_robot_for_recovery():
-                self.halted_on_error = True
-                return False
-
+                continue
+            
             if self._movj_raw(pose_dict):
                 retry_err = self._read_robot_error_id()
                 if retry_err is None:
@@ -616,6 +593,7 @@ class TestColorSorter(Node):
                     self.halted_on_error = True
                     return False
                 if retry_err == 0:
+                    self.get_logger().info('Error-18 recovery successful with orientation toggle')
                     return True
                 if retry_err != 18:
                     self.get_logger().error(
@@ -628,11 +606,11 @@ class TestColorSorter(Node):
 
             if idx < len(retry_orientations):
                 self.get_logger().warn(
-                    'MovJ retry still hit error_id=18. Next attempt will switch orientation, move home, then retry target pose.'
+                    'MovJ retry still hit error_id=18. Trying next orientation.'
                 )
 
         self.get_logger().error(
-            'MovJ retry failed after orientation toggles l_or_r=0 -> 1 -> 0. Halting sorter.'
+            'MovJ retry failed after orientation toggles. Halting sorter.'
         )
         self.halted_on_error = True
         return False
@@ -711,7 +689,6 @@ class TestColorSorter(Node):
         self.get_logger().info('Clearing robot errors')
         req = ClearError.Request()
         self._call_service_sync(self.clear_error_client, req, command_name='ClearError', check_error=False)
-        time.sleep(1.0)
         
         # Enable robot
         self.get_logger().info('Enabling robot')
@@ -720,7 +697,6 @@ class TestColorSorter(Node):
             self.get_logger().error('EnableRobot failed or robot still in error state')
             self.halted_on_error = True
             return
-        time.sleep(1.0)
 
         # Set default runtime speed factor
         self.get_logger().info(f'Setting default speed factor to {self.speed_factor}%')
@@ -728,13 +704,11 @@ class TestColorSorter(Node):
             self.get_logger().error('Failed to set default speed factor')
             self.halted_on_error = True
             return
-        time.sleep(0.5)
 
         if not self.movj(self._home_pose()):
             self.get_logger().error('Failed initial move to home position')
             self.halted_on_error = True
             return
-        time.sleep(self.home_settle_sec)
         
         self.get_logger().info('Robot initialization complete')
         self.initialized = True
@@ -807,7 +781,6 @@ class TestColorSorter(Node):
                         self.get_logger().error(f"Failed to move to pick location")
                         cycle_failed = True
                         break
-                    time.sleep(1.0)
 
                     # Pickup
                     self.current_pick_pose = dict(target['pos'])
@@ -823,14 +796,12 @@ class TestColorSorter(Node):
                         self.get_logger().error(f"Failed to move to bin")
                         cycle_failed = True
                         break
-                    time.sleep(1.0)
 
                     # Release
                     if not self.release_sequence():
                         self.get_logger().error('Release sequence failed')
                         cycle_failed = True
                         break
-                    time.sleep(1.0)
 
                 if cycle_failed:
                     self.get_logger().error('Sort cycle aborted due to command failure or robot error.')

@@ -229,12 +229,12 @@ private:
     static void tcpDoCmd(std::shared_ptr<TcpClient>& tcp, const char* cmd,
                          int32_t& err_id, std::vector<std::string>& result,
                          const rclcpp::Logger& logger) {
+        err_id = -1;
         // Wait up to 10s for socket to be connected before sending
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (!tcp->isConnect()) {
             if (std::chrono::steady_clock::now() > deadline) {
                 RCLCPP_ERROR(logger, "tcpDoCmd: socket not connected, dropping cmd: %s", cmd);
-                err_id = -1;
                 return;
             }
             RCLCPP_WARN(logger, "tcpDoCmd: waiting for socket reconnect...");
@@ -258,8 +258,13 @@ private:
             std::size_t paren = cmd_str.find('(');
             std::string cmd_name = (paren != std::string::npos) ? cmd_str.substr(0, paren) : cmd_str;
             parseString(std::string(buf), cmd_name, err_id, result);
+            return;
         } catch (const std::logic_error& err) {
             RCLCPP_ERROR(logger, "tcpDoCmd failed: %s", err.what());
+            err_id = -1;
+        } catch (const std::exception& err) {
+            RCLCPP_ERROR(logger, "tcpDoCmd unexpected error: %s", err.what());
+            err_id = -1;
         }
     }
 

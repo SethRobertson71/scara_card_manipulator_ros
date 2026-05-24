@@ -3,7 +3,7 @@
 > **Educational Use Only**
 > This project was developed as a course deliverable for the SAU Engineering Robotics class, 2026.
 > It is released under an educational license. Use, reproduction, or adaptation is permitted for
-> non-commercial educational and academic purposes only. See [LICENSE](#license) for full terms.
+> non-commercial educational and academic purposes only. See [LICENSE](https://github.com/SethRobertson71/scara_card_manipulator_ros/blob/main/LICENSE) for full terms.
 
 A ROS2 Jazzy–based pick-and-place system built around the **Dobot M1 Pro SCARA robot arm**,
 targeting automated Skip-Bo card sorting via classical computer vision. The entire stack runs inside
